@@ -1,7 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "aidoctorswarm",
-  "main": ".open-next/worker.js",
+  // worker.ts wraps the OpenNext handler (.open-next/worker.js) and adds Willie's `scheduled` cron export.
+  "main": "./worker.ts",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
@@ -12,7 +13,12 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "aidoctorswarm", "database_id": "REPLACE_WITH_D1_ID" }
   ],
-  "triggers": { "crons": ["*/15 * * * *"] },   // Willie: dispatch due tasks (followups, digests, reminders)
-  "vars": { "SWARM_MODEL": "claude-sonnet-4-5" }
-  // Secrets (never here): npx wrangler secret put ANTHROPIC_API_KEY ; npx wrangler secret put RESEND_API_KEY
+  "triggers": { "crons": ["*/15 * * * *"] },   // Willie: dispatch due tasks (sanity checks, reminders)
+  "vars": {
+    "SWARM_MODEL": "claude-opus-5-5",
+    "APP_URL": "https://aidoctorswarm.com"
+  }
+  // Secrets (never here) — `npx wrangler secret put <NAME>` for each:
+  //   ANTHROPIC_API_KEY  SESSION_SECRET  CRON_SECRET  INBOUND_SECRET
+  //   RESEND_API_KEY  TWILIO_ACCOUNT_SID  TWILIO_AUTH_TOKEN  TWILIO_FROM
 }
