@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "aidoctorswarm",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": ".open-next/assets", "binding": "ASSETS" },
+  "routes": [
+    { "pattern": "aidoctorswarm.com", "custom_domain": true },
+    { "pattern": "www.aidoctorswarm.com", "custom_domain": true }
+  ],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "aidoctorswarm", "database_id": "REPLACE_WITH_D1_ID" }
+  ],
+  "triggers": { "crons": ["*/15 * * * *"] },   // Willie: dispatch due tasks (followups, digests, reminders)
+  "vars": { "SWARM_MODEL": "claude-sonnet-4-5" }
+  // Secrets (never here): npx wrangler secret put ANTHROPIC_API_KEY ; npx wrangler secret put RESEND_API_KEY
+}
