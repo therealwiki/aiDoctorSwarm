@@ -69,4 +69,4 @@ npm run deploy                               # builds with OpenNext and deploys 
 
 ## Agents
 
-Edit the roster in `src/lib/agents.ts`. Each agent has a system prompt; `SHARED_RULES` applies to all (be brief, never shame, say when to see someone in person, stand down if not relevant). Add an agent by appending to `AGENTS` — the UI picks it up.
+Edit the roster in `src/lib/agents.ts`. Each agent has a system prompt; `SHARED_RULES` applies to all (be brief, never shame, say when to see someone in person, stand down if not relevant). Add an agent by appending to `AGENTS` , the UI picks it up.
