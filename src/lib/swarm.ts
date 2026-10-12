@@ -8,12 +8,22 @@ function client(): Anthropic | null {
   return new Anthropic({ apiKey: key });
 }
 
-const MODEL = process.env.SWARM_MODEL ?? "claude-sonnet-4-5";
+// Current Opus by default; override with SWARM_MODEL (e.g. claude-sonnet-5-5 for a cheaper swarm).
+const MODEL = process.env.SWARM_MODEL || "claude-opus-5-5";
+
+// Thinking is always on for these models and counts toward max_tokens, so the cap is sized for
+// thinking + a short reply. `effort: low` keeps the specialists quick; the moderator thinks a bit more.
+// `fallbacks: "default"` re-runs a request that a safety classifier declines on a fallback model
+// server-side, so a sensitive but legitimate health question still gets an answer.
+const BETAS = ["server-side-fallback-2026-07-01"];
 
 async function askOne(c: Anthropic, agent: Agent, question: string, context?: string): Promise<AgentAnswer> {
-  const msg = await c.messages.create({
+  const msg = await c.beta.messages.create({
     model: MODEL,
-    max_tokens: 400,
+    max_tokens: 4000,
+    betas: BETAS,
+    fallbacks: "default",
+    output_config: { effort: "low" },
     system: agent.system + "\n" + SHARED_RULES,
     messages: [
       {
@@ -22,26 +32,43 @@ async function askOne(c: Anthropic, agent: Agent, question: string, context?: st
       },
     ],
   });
+  if (msg.stop_reason === "refusal") {
+    return { agent: agent.id, text: "I can't weigh in on this one. The other agents will, and a clinician can.", standsDown: true };
+  }
   const text = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
   const standsDown = /not the right specialist|stand(?:ing)? down|outside my (?:scope|area)/i.test(text) && text.length < 300;
   return { agent: agent.id, text, standsDown };
 }
 
+const CONSENSUS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["agree", "summary", "urgency", "nextStep"],
+  properties: {
+    agree: { type: "boolean" },
+    summary: { type: "string", description: "One sentence: what the agents agree on, or exactly where they differ." },
+    urgency: { type: "string", enum: ["emergency", "today", "this-week", "routine", "none"] },
+    nextStep: { type: "string", description: "One concrete next action for the patient." },
+  },
+} as const;
+
 async function consensusPass(c: Anthropic, question: string, answers: AgentAnswer[]): Promise<Consensus> {
-  const transcript = answers
-    .filter((a) => !a.standsDown)
-    .map((a) => `${AGENTS.find((x) => x.id === a.agent)!.name}: ${a.text}`)
-    .join("\n\n");
-  const msg = await c.messages.create({
+  const active = answers.filter((a) => !a.standsDown);
+  if (!active.length) return { agree: true, summary: "No agent felt this was theirs to answer. A clinician is the right next stop.", urgency: "none", nextStep: "" };
+  const transcript = active.map((a) => `${AGENTS.find((x) => x.id === a.agent)!.name}: ${a.text}`).join("\n\n");
+  const msg = await c.beta.messages.create({
     model: MODEL,
-    max_tokens: 300,
+    max_tokens: 4000,
+    betas: BETAS,
+    fallbacks: "default",
+    output_config: { effort: "medium", format: { type: "json_schema", schema: CONSENSUS_SCHEMA } },
     system:
-      "You are the moderator of a swarm of medical specialist agents. Read their answers and return ONLY a JSON object: {\"agree\": boolean, \"summary\": string (one sentence, what they agree on or exactly where they differ), \"urgency\": one of \"emergency\"|\"today\"|\"this-week\"|\"routine\"|\"none\", \"nextStep\": string (one concrete next action for the patient)}. Prefer the most cautious urgency any agent stated.",
+      "You are the moderator of a swarm of medical specialist agents. Read their answers and report whether they agree, the most cautious urgency any agent stated, and one concrete next step for the patient. Never shame the patient.",
     messages: [{ role: "user", content: `Question: ${question}\n\n${transcript}` }],
   });
   const raw = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("");
   try {
-    const j = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+    const j = JSON.parse(raw) as Partial<Consensus>;
     return {
       agree: !!j.agree,
       summary: String(j.summary ?? ""),
@@ -61,7 +88,6 @@ export async function runSwarm(question: string, context?: string): Promise<Swar
   const consensus = await consensusPass(c, question, answers);
   return { question, answers, consensus, mocked: false };
 }
-
 // ---------- mock, used when ANTHROPIC_API_KEY is unset ----------
 function mockSwarm(question: string): SwarmResult {
   const q = question.toLowerCase();
