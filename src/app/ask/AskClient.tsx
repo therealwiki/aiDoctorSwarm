@@ -6,9 +6,9 @@ import Link from "next/link";
 import AskBox from "@/components/AskBox";
 import { AGENTS, type SwarmResult } from "@/lib/agents";
 import { WillieSays } from "@/components/Willie";
-import { WILLIE_SAYS, type Task } from "@/lib/willie";
+import { WILLIE_SAYS, daysUntil, type Task } from "@/lib/willie";
 
-type AskResponse = SwarmResult & { askId: string; plan: Task[] };
+type AskResponse = SwarmResult & { askId: string; plan: Task[]; scheduled: boolean };
 
 const URGENCY: Record<string, { label: string; bg: string; fg: string }> = {
   emergency: { label: "Call emergency services now", bg: "#FEE2E2", fg: "#991B1B" },
@@ -21,21 +21,25 @@ const URGENCY: Record<string, { label: string; bg: string; fg: string }> = {
 export default function AskClient() {
   const params = useSearchParams();
   const q = params.get("q") ?? "";
+  const id = params.get("id") ?? "";
   const [res, setRes] = useState<AskResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!q) return;
+    if (!q && !id) return;
     let alive = true;
     setRes(null);
     setErr(null);
     setLoading(true);
-    fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: q }) })
+    const req = id
+      ? fetch(`/api/ask?id=${encodeURIComponent(id)}`)
+      : fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: q }) });
+    req
       .then(async (r) => {
-        const j = await r.json();
+        const j = (await r.json()) as AskResponse & { error?: string };
         if (!r.ok) throw new Error(j.error ?? "Failed");
-        return j as AskResponse;
+        return j;
       })
       .then((j) => alive && setRes(j))
       .catch((e) => alive && setErr(e.message))
@@ -43,7 +47,7 @@ export default function AskClient() {
     return () => {
       alive = false;
     };
-  }, [q]);
+  }, [q, id]);
 
   const active = res?.answers.filter((a) => !a.standsDown) ?? [];
   const quiet = res?.answers.filter((a) => a.standsDown) ?? [];
@@ -51,7 +55,7 @@ export default function AskClient() {
 
   return (
     <div className="flex flex-col gap-6 max-w-3xl">
-      <AskBox initial={q} />
+      <AskBox initial={q || res?.question || ""} />
 
       {loading && (
         <div className="flex flex-col gap-3" aria-live="polite">
@@ -116,13 +120,20 @@ export default function AskClient() {
           {(() => {
             const fu = res.plan?.find((t) => t.kind === "followup");
             if (!fu) return null;
-            const days = Math.max(1, Math.round((new Date(fu.dueAt).getTime() - Date.now()) / 86400000));
-            return (
+            const days = daysUntil(fu.dueAt);
+            return res.scheduled ? (
               <WillieSays
                 mood="hop"
                 action={<Link href="/sanity-checks" className="btn-ghost text-sm no-underline whitespace-nowrap">Sanity checks</Link>}
               >
                 {WILLIE_SAYS.planned(days)} <span className="text-ink-soft">By {fu.channels.join(" or ")}.</span>
+              </WillieSays>
+            ) : (
+              <WillieSays
+                mood="listen"
+                action={<Link href="/signin?next=/sanity-checks" className="btn-sun text-sm no-underline whitespace-nowrap">Sign in</Link>}
+              >
+                {WILLIE_SAYS.plannedSignedOut(days)}
               </WillieSays>
             );
           })()}

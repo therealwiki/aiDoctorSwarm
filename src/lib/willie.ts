@@ -5,7 +5,8 @@
 // to use (per the patient's permissions), which agent should own the task, and when to hop back
 // and ask "were we right?".
 //
-// Everything here is channel-agnostic. The channel adapters live in ./channels/*.
+// Everything here is channel-agnostic and client-safe (no SDK, no DB). The channel adapters live
+// in ./channels/*, the D1 queries in ./store.ts, the cron logic in ./dispatch.ts.
 
 import type { Consensus, SwarmResult } from "./agents";
 
@@ -17,6 +18,8 @@ export type TaskKind =
   | "digest"          // circle summary                 → Willie, email
   | "reminder"        // nudge                          → Willie, sms/app
   | "handoff";        // refer a question to the swarm  → swarm, app
+
+export type PermissionMode = "off" | "ask" | "auto";
 
 export interface Task {
   id: string;
@@ -44,6 +47,15 @@ export const DEFAULT_PREFS: ChannelPrefs = {
   allow: { app: true, email: true, sms: false, circle: true, calendar: false },
 };
 
+/** Per-task-type permission defaults; the patient overrides these in /agents. */
+export const DEFAULT_PERMISSIONS: Record<string, PermissionMode> = {
+  schedule: "ask",
+  records: "ask",
+  refills: "off",
+  digest: "auto",
+  reminders: "auto",
+};
+
 const DAY = 86_400_000;
 
 /** How long before Willie checks back, by urgency of the swarm's answer. */
@@ -57,20 +69,34 @@ export function followupDelay(urgency: Consensus["urgency"]): number {
   }
 }
 
+export function daysUntil(iso: string, now = Date.now()): number {
+  return Math.max(1, Math.round((new Date(iso).getTime() - now) / DAY));
+}
+
 function pickChannels(prefs: ChannelPrefs, wanted: Channel[]): Channel[] {
   const out = wanted.filter((c) => prefs.allow[c]);
   return out.length ? out : ["app"];
 }
 
-let seq = 0;
-const newId = (p: string) => `${p}_${Date.now().toString(36)}${(seq++).toString(36)}`;
+function newId(prefix: string): string {
+  const b = new Uint8Array(8);
+  crypto.getRandomValues(b);
+  return `${prefix}_${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
+}
 
 /**
  * After a swarm answer, Willie plans what happens next:
  *  - a follow-up to ask whether the swarm was right
- *  - a scheduling task if the consensus says a visit is needed
+ *  - a scheduling task if the consensus says a visit is needed — unless the patient set
+ *    "Book and reschedule visits" to Off; Auto skips the approval step.
  */
-export function planAfterAsk(askId: string, result: SwarmResult, prefs: ChannelPrefs = DEFAULT_PREFS, now = Date.now()): Task[] {
+export function planAfterAsk(
+  askId: string,
+  result: SwarmResult,
+  prefs: ChannelPrefs = DEFAULT_PREFS,
+  perms: Record<string, PermissionMode> = DEFAULT_PERMISSIONS,
+  now = Date.now(),
+): Task[] {
   const tasks: Task[] = [];
   const u = result.consensus.urgency;
 
@@ -87,7 +113,8 @@ export function planAfterAsk(askId: string, result: SwarmResult, prefs: ChannelP
     status: "queued",
   });
 
-  if (u === "today" || u === "this-week" || u === "routine") {
+  const scheduleMode = perms.schedule ?? DEFAULT_PERMISSIONS.schedule;
+  if ((u === "today" || u === "this-week" || u === "routine") && scheduleMode !== "off") {
     tasks.push({
       id: newId("sch"),
       kind: "schedule",
@@ -96,9 +123,9 @@ export function planAfterAsk(askId: string, result: SwarmResult, prefs: ChannelP
       detail: result.consensus.nextStep,
       dueAt: new Date(now + (u === "today" ? 0 : u === "this-week" ? 2 * DAY : 7 * DAY)).toISOString(),
       channels: pickChannels(prefs, ["calendar", "email", "app"]),
-      approval: "ask",
+      approval: scheduleMode,
       relatedAskId: askId,
-      status: "waiting-approval",
+      status: scheduleMode === "auto" ? "queued" : "waiting-approval",
     });
   }
   return tasks;
@@ -107,30 +134,45 @@ export function planAfterAsk(askId: string, result: SwarmResult, prefs: ChannelP
 /**
  * Inbound message from any channel (email reply, SMS, circle chat). Willie classifies it and
  * either answers a task, or refers the text to the swarm as a new question.
+ * `inReplyTo` is a task id (the reply token). Resolving it to an ask/user happens in the route.
  */
 export type Inbound = { channel: Channel; from: string; text: string; inReplyTo?: string };
 export type Routed =
   | { action: "approve" | "decline"; taskId: string }
-  | { action: "outcome"; askId: string; verdict: Outcome["verdict"]; note: string }
+  | { action: "outcome"; taskId: string; verdict: Outcome["verdict"]; note: string }
   | { action: "ask"; question: string }
   | { action: "ignore"; reason: string };
 
 export function routeInbound(msg: Inbound): Routed {
-  const t = msg.text.trim();
+  const t = stripQuoted(msg.text);
   const low = t.toLowerCase();
   if (msg.inReplyTo?.startsWith("sch_") || msg.inReplyTo?.startsWith("rec_")) {
-    if (/^(yes|y|approve|ok|book it|go ahead)\b/.test(low)) return { action: "approve", taskId: msg.inReplyTo };
-    if (/^(no|n|decline|cancel|don'?t)\b/.test(low)) return { action: "decline", taskId: msg.inReplyTo };
+    if (/^(yes|y|yep|approve|ok|okay|book it|go ahead)\b/.test(low)) return { action: "approve", taskId: msg.inReplyTo };
+    if (/^(no|n|nope|decline|cancel|don'?t|stop)\b/.test(low)) return { action: "decline", taskId: msg.inReplyTo };
   }
   if (msg.inReplyTo?.startsWith("fu_")) {
-    const askId = msg.inReplyTo.replace(/^fu_/, "ask_");
-    if (/^(yes|right|correct|spot on)\b/.test(low)) return { action: "outcome", askId, verdict: "right", note: t };
-    if (/^(partly|sort of|kind of|mostly)\b/.test(low)) return { action: "outcome", askId, verdict: "partly", note: t };
-    if (/^(no|wrong|nope)\b/.test(low)) return { action: "outcome", askId, verdict: "wrong", note: t };
-    if (/^(not yet|still waiting|haven'?t)\b/.test(low)) return { action: "outcome", askId, verdict: "unknown", note: t };
+    const taskId = msg.inReplyTo;
+    if (/^(yes|yep|right|correct|spot on)\b/.test(low)) return { action: "outcome", taskId, verdict: "right", note: t };
+    if (/^(partly|sort of|kind of|mostly|half)\b/.test(low)) return { action: "outcome", taskId, verdict: "partly", note: t };
+    if (/^(no|nope|wrong)\b/.test(low)) return { action: "outcome", taskId, verdict: "wrong", note: t };
+    if (/^(not yet|still waiting|haven'?t|don'?t know)\b/.test(low)) return { action: "outcome", taskId, verdict: "unknown", note: t };
   }
   if (t.length < 3) return { action: "ignore", reason: "empty" };
   return { action: "ask", question: t };
+}
+
+/** Drop quoted history and signatures from an email reply so routing sees only the new text. */
+export function stripQuoted(text: string): string {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out: string[] = [];
+  for (const l of lines) {
+    if (/^>/.test(l)) break;
+    if (/^On .+wrote:\s*$/.test(l)) break;
+    if (/^-- ?$/.test(l)) break;
+    if (/^(From|Sent|To|Subject):\s/.test(l)) break;
+    out.push(l);
+  }
+  return out.join("\n").trim();
 }
 
 /** What the patient tells us later. This is the ground truth the swarm learns from. */
@@ -143,10 +185,30 @@ export interface Outcome {
   reportedAt: string;
 }
 
-/** Willie's lines, so he sounds like one character everywhere. */
+/**
+ * Willie's lines, so he sounds like one character everywhere — app, email, SMS.
+ * Email subjects never carry a diagnosis or the question; health detail stays behind a signed link.
+ */
 export const WILLIE_SAYS = {
   planned: (days: number) => `I'll hop back in ${days} day${days === 1 ? "" : "s"} for a sanity check — did this turn out right?`,
+  plannedSignedOut: (days: number) =>
+    `Sign in and I'll hop back in ${days} day${days === 1 ? "" : "s"} for a sanity check — did this turn out right?`,
   followup: "Hey — it's Willie, here for a sanity check. A while ago you asked the swarm something. Were they right?",
+  followupShort: "Willie here for a sanity check: was the swarm right about what you asked? Reply YES, PARTLY, NO or NOT YET.",
   thanks: "Thanks. That goes straight back to the swarm so they do better next time.",
   approvalEmail: (title: string) => `${title}? Reply YES to go ahead or NO to skip. Nothing happens until you say.`,
-};
+  approved: (title: string) => `Got it — "${title}" is a go. I'll let you know when it's done.`,
+  declined: (title: string) => `No problem — "${title}" is off the list.`,
+  reminder: (title: string) => `Quick nudge from Willie: ${title}.`,
+  answered: "The swarm has read your question and answered. Your answer is behind the link below — it's private to you.",
+  signIn: "Here's your one-time sign-in link. It works once and expires in 15 minutes. If you didn't ask for it, ignore this email.",
+  unknownSender: "I only act on messages from an address or number linked to an account, so I've set this one aside. Sign in at aidoctorswarm.com to link it.",
+  subjects: {
+    followup: "Quick sanity check from Willie",
+    approval: "One thing needs your OK",
+    magic: "Your sign-in link",
+    answer: "The swarm has answered",
+    digest: "Your care circle this week",
+    reminder: "A nudge from Willie",
+  },
+} as const;
