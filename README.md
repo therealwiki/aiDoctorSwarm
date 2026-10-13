@@ -22,14 +22,14 @@ npm run dev                      # http://localhost:3000
 | Route | Status |
 |---|---|
 | `/` | Ask box, three example prompts. Done. |
-| `/ask?q=` · `/ask?id=` | Calls `POST /api/ask` (or re-opens a saved answer by id); urgency + consensus banner, one card per agent, stood-down agents listed, Willie's "I'll hop back in N days" card. Done. |
-| `/api/ask` | Runs the 4 agents in `src/lib/agents.ts` in parallel, then a JSON consensus pass. Saves the ask; for signed-in users also queues Willie's tasks and emails any approval request. |
+| `/ask?q=` · `/ask?id=` | Streams `POST /api/ask` (or re-opens a saved answer by id); cards fill as each agent finishes, then the urgency + consensus banner, stood-down agents, Willie's "I'll hop back in N days" card. Done. |
+| `/api/ask` | NDJSON stream: `start` → one `answer` per agent as it lands → `consensus` → `done` (askId, plan). Runs the 4 agents in `src/lib/agents.ts` in parallel, then a JSON consensus pass. Saves the ask; for signed-in users also queues Willie's tasks and emails any approval request. |
 | `/signin` → `/api/auth/magic` → `/api/auth/callback` | Magic-link sign-in, HMAC-signed 30-day cookie. Done. |
 | `/agents` | Approval inbox + per-task Off / Ask me / Auto permissions, from D1 when signed in (demo otherwise). Approve/decline in-app or one-tap from email. Done. |
 | `/sanity-checks` | Willie's due and upcoming sanity checks from D1; `POST /api/outcomes` stores the verdict. Done. |
 | `/api/willie/dispatch` | Willie's cron body (see below). Done. |
 | `/api/willie/inbound` | One webhook for email (JSON) and SMS (Twilio form). Routes YES/NO, outcome verdicts and new questions. Done. |
-| `/me` | Account state; record connections are placeholders. |
+| `/me` | Account state + **health notes**: age range, conditions, medications, allergies, recent results, kept in the browser only (`localStorage`) and sent as `context` with each question. Never stored server-side. Record connections are placeholders. |
 | `/community`, `/community/[topic]`, `/circle` | Seed data only. |
 | `/atlas`, `/privacy` | Placeholders. |
 
@@ -57,15 +57,18 @@ All templates are plain text in `src/lib/templates.ts`; Willie's lines live in `
 - **Inbound (humans):** Cloudflare Email Routing → forward `hello@`, `clinics@`, `support@`, `privacy@` to a real mailbox.
 - **SMS (Twilio):** set the messaging webhook to the same inbound URL (form-encoded). Requests are signature-checked when `TWILIO_AUTH_TOKEN` is set; Willie's reply goes back as TwiML.
 
+## Patient context
+
+`src/lib/context.ts` builds the `context` string from the patient's health notes on `/me`. The notes live only in their browser; `/api/ask` uses them for that answer and stores only the question and the agents' answers. This keeps the rule that the app DB never holds raw PHI. When verified records exist (identity match → lab attestation → hash anchoring), a vault reference resolved at ask time replaces this.
+
 ## What's not wired yet (in order)
 
-1. **Patient context** — `/api/ask` already accepts `context`; `/me` needs to produce it from connected records (no raw PHI in D1, store a vault reference).
+1. **Verified records** — the vault, the three-step verification, and resolving a vault reference into `context` at ask time; `/me` has the placeholders.
 2. **Executors for scheduling/records tasks** — approved `schedule` tasks sit at `queued` until the calendar adapter has OAuth (`channel_links.refresh_token`) and a booking flow; same for `records`.
 3. **Circle + community persistence** — swap the seeds in `src/lib/data.ts` for D1 (`circles`, `circle_messages`, `topics`, `posts`), then the circle digest task (template exists).
 4. **SMS linking** — a `/me` flow to add and verify a phone number into `channel_links` so Willie may text.
-5. **Streaming** — `/api/ask` returns one JSON blob; switch to a streamed response so cards fill as each agent finishes.
-6. **Fact-check job** — a queue/cron that runs the swarm over new community posts and writes `fact_check` + `fact_note`.
-7. **Atlas** — Cytoscape.js / WikiPathways rendering.
+5. **Fact-check job** — a queue/cron that runs the swarm over new community posts and writes `fact_check` + `fact_note`.
+6. **Atlas** — Cytoscape.js / WikiPathways rendering.
 
 ## Deploy to Cloudflare
 

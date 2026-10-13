@@ -80,13 +80,39 @@ async function consensusPass(c: Anthropic, question: string, answers: AgentAnswe
   }
 }
 
+/**
+ * Run the swarm, reporting each agent's answer as it lands (for streaming UIs), then the consensus.
+ * Without an API key the scripted demo answers arrive with a short stagger so the UI can be exercised.
+ */
+export async function runSwarmStream(
+  question: string,
+  context: string | undefined,
+  onAnswer: (a: AgentAnswer) => void,
+): Promise<SwarmResult> {
+  const c = client();
+  if (!c) {
+    const m = mockSwarm(question);
+    for (const a of m.answers) {
+      await new Promise((r) => setTimeout(r, 250));
+      onAnswer(a);
+    }
+    return m;
+  }
+  const answers = await Promise.all(
+    AGENTS.map(async (a) => {
+      const ans = await askOne(c, a, question, context);
+      onAnswer(ans);
+      return ans;
+    }),
+  );
+  const consensus = await consensusPass(c, question, answers);
+  return { question, answers, consensus, mocked: false };
+}
+
 export async function runSwarm(question: string, context?: string): Promise<SwarmResult> {
   const c = client();
   if (!c) return mockSwarm(question);
-
-  const answers = await Promise.all(AGENTS.map((a) => askOne(c, a, question, context)));
-  const consensus = await consensusPass(c, question, answers);
-  return { question, answers, consensus, mocked: false };
+  return runSwarmStream(question, context, () => {});
 }
 // ---------- mock, used when ANTHROPIC_API_KEY is unset ----------
 function mockSwarm(question: string): SwarmResult {
